@@ -32,14 +32,74 @@ void loopWebSocket() {
   flushLogBroadcasts();  // diffuse les logs mis en file depuis les tasks async
 }
 
+// ===== Gestion des sessions =====
+static char sessionToken[33] = {0};
+
+static void generateSessionToken() {
+  snprintf(sessionToken, sizeof(sessionToken), "%08lx%08lx%08lx%08lx",
+           (unsigned long)esp_random(), (unsigned long)esp_random(),
+           (unsigned long)esp_random(), (unsigned long)esp_random());
+}
+
+static const char* getValidPassword() {
+  return (strlen(config.adminPassword) > 0) ? config.adminPassword : DEFAULT_ADMIN_PASSWORD;
+}
+
+static bool isAuthenticated(AsyncWebServerRequest *request) {
+  if (!request->hasHeader("Cookie")) return false;
+  String cookie = request->getHeader("Cookie")->value();
+  String needle = String("session=") + sessionToken;
+  return cookie.indexOf(needle) >= 0;
+}
+
+static bool checkAuth(AsyncWebServerRequest *request) {
+  if (isAuthenticated(request)) return true;
+  request->send(401, "application/json", "{\"error\":\"Non authentifi\u00e9\"}");
+  return false;
+}
+
 void setupWebServer() {
+  generateSessionToken();
+
+  // Page de connexion
+  server.on("/login", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (isAuthenticated(request)) { request->redirect("/"); return; }
+    request->send_P(200, "text/html", login_html);
+  });
+
+  server.on("/login", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (request->hasParam("password", true)) {
+      String pwd = request->getParam("password", true)->value();
+      if (strcmp(pwd.c_str(), getValidPassword()) == 0) {
+        AsyncWebServerResponse *response = request->beginResponse(302, "text/plain", "");
+        String cookie = String("session=") + sessionToken + "; HttpOnly; SameSite=Strict; Path=/";
+        response->addHeader("Set-Cookie", cookie);
+        response->addHeader("Location", "/");
+        request->send(response);
+        return;
+      }
+      logMessage("[WEB] Tentative de connexion avec mot de passe erron\u00e9");
+    }
+    request->redirect("/login?error=1");
+  });
+
+  server.on("/logout", HTTP_POST, [](AsyncWebServerRequest *request){
+    generateSessionToken();  // invalide toutes les sessions existantes
+    AsyncWebServerResponse *response = request->beginResponse(302, "text/plain", "");
+    response->addHeader("Set-Cookie", "session=deleted; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    response->addHeader("Location", "/login");
+    request->send(response);
+  });
+
   // Page principale
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!isAuthenticated(request)) { request->redirect("/login"); return; }
     request->send_P(200, "text/html", index_html);
   });
   
   // API - Statut système
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     JsonDocument doc;
     doc["mqtt"] = mqttClient.connected();
     doc["barrier"] = digitalRead(pins.photoBarrier);
@@ -57,8 +117,13 @@ void setupWebServer() {
   });
 
   // API - Démarrer mode apprentissage
-  server.on("/api/learn", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+  server.on("/api/learn", HTTP_POST,
+    [](AsyncWebServerRequest *request){
+      if (!isAuthenticated(request))
+        request->send(401, "application/json", "{\"error\":\"Non authentifié\"}");
+    }, NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      if (!isAuthenticated(request)) return;
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, (const char*)data);
       if (error) {
@@ -78,13 +143,19 @@ void setupWebServer() {
 
   // API - Arrêter mode apprentissage
   server.on("/api/learn/stop", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     stopLearningMode();
     request->send(200, "application/json", "{\"message\":\"Mode apprentissage arr\u00eat\u00e9\"}");
   });
   
   // API - Contrôle relais
-  server.on("/api/relay", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+  server.on("/api/relay", HTTP_POST,
+    [](AsyncWebServerRequest *request){
+      if (!isAuthenticated(request))
+        request->send(401, "application/json", "{\"error\":\"Non authentifié\"}");
+    }, NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      if (!isAuthenticated(request)) return;
       JsonDocument doc;
       deserializeJson(doc, (const char*)data);
       
@@ -107,6 +178,7 @@ void setupWebServer() {
   
   // API - Récupérer les codes
   server.on("/api/codes", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     JsonDocument doc;
     JsonArray codes = doc["codes"].to<JsonArray>();
     
@@ -124,8 +196,13 @@ void setupWebServer() {
   });
   
   // API - Ajouter un code
-  server.on("/api/codes", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+  server.on("/api/codes", HTTP_POST,
+    [](AsyncWebServerRequest *request){
+      if (!isAuthenticated(request))
+        request->send(401, "application/json", "{\"error\":\"Non authentifié\"}");
+    }, NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      if (!isAuthenticated(request)) return;
       if (accessCodeCount >= 50) {
         request->send(400, "application/json", "{\"error\":\"Limite de codes atteinte\"}");
         return;
@@ -190,6 +267,7 @@ void setupWebServer() {
   
   // API - Supprimer un code (DELETE /api/codes?index=X)
   server.on("/api/codes", HTTP_DELETE, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     if (!request->hasParam("index")) {
       request->send(400, "application/json", "{\"error\":\"Param\\u00e8tre index manquant\"}");
       return;
@@ -216,6 +294,7 @@ void setupWebServer() {
   
   // API - Récupérer les logs
   server.on("/api/logs", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     JsonDocument doc;
     JsonArray logs = doc["logs"].to<JsonArray>();
     
@@ -236,6 +315,7 @@ void setupWebServer() {
   
   // API - Récupérer la configuration
   server.on("/api/config", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     JsonDocument doc;
     doc["relayDuration"] = config.relayDuration;
     doc["photoEnabled"] = config.photoBarrierEnabled;
@@ -255,8 +335,13 @@ void setupWebServer() {
   });
   
   // API - Enregistrer la configuration
-  server.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+  server.on("/api/config", HTTP_POST,
+    [](AsyncWebServerRequest *request){
+      if (!isAuthenticated(request))
+        request->send(401, "application/json", "{\"error\":\"Non authentifié\"}");
+    }, NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      if (!isAuthenticated(request)) return;
       JsonDocument doc;
       deserializeJson(doc, (const char*)data);
       
@@ -297,6 +382,7 @@ void setupWebServer() {
   
   // API - Lire la configuration des broches GPIO
   server.on("/api/pins", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     JsonDocument doc;
     doc["wiegandD0"]    = pins.wiegandD0;
     doc["wiegandD1"]    = pins.wiegandD1;
@@ -314,8 +400,13 @@ void setupWebServer() {
   });
 
   // API - Enregistrer la configuration des broches GPIO
-  server.on("/api/pins", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+  server.on("/api/pins", HTTP_POST,
+    [](AsyncWebServerRequest *request){
+      if (!isAuthenticated(request))
+        request->send(401, "application/json", "{\"error\":\"Non authentifié\"}");
+    }, NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      if (!isAuthenticated(request)) return;
       JsonDocument doc;
       if (deserializeJson(doc, (const char*)data)) {
         request->send(400, "application/json", "{\"error\":\"JSON invalide\"}");
@@ -348,14 +439,14 @@ void setupWebServer() {
   );
 
   // API - Réinitialiser les identifiants WiFi (passe en mode AP)
-  server.on("/api/wifi/reset", HTTP_POST, [](AsyncWebServerRequest *request){
-    request->send(200, "application/json", "{\"message\":\"Réinitialisation WiFi en cours...\"}" );
+  server.on("/api/wifi/reset", HTTP_POST, [](AsyncWebServerRequest *request){    if (!checkAuth(request)) return;    request->send(200, "application/json", "{\"message\":\"Réinitialisation WiFi en cours...\"}" );
     delay(500);
     resetWifiAndRestart();
   });
 
   // API - Redémarrer l'ESP32
   server.on("/api/restart", HTTP_POST, [](AsyncWebServerRequest *request){
+    if (!checkAuth(request)) return;
     request->send(200, "application/json", "{\"message\":\"Redémarrage en cours...\"}");
     delay(1000);
     ESP.restart();

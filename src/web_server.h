@@ -107,9 +107,14 @@ const char index_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>&#127968; Volet Roulant ESP32</h1>
-    <p>Contr&#244;leur intelligent &#8212; Wiegand / RFID / Empreinte digitale</p>
+  <header style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+    <div>
+      <h1>&#127968; Volet Roulant ESP32</h1>
+      <p>Contr&#244;leur intelligent &#8212; Wiegand / RFID / Empreinte digitale</p>
+    </div>
+    <form method="POST" action="/logout" style="padding-top:4px;">
+      <button type="submit" style="background:rgba(255,255,255,.15);border:1.5px solid rgba(255,255,255,.4);color:#fff;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;">&#128274; D&#233;connexion</button>
+    </form>
   </header>
 
   <nav>
@@ -553,6 +558,47 @@ window.addEventListener('load',function(){
   setInterval(loadSt,5000);
   initWS();
 });
+</script>
+</body>
+</html>
+)rawliteral";
+
+// Page de connexion
+const char login_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connexion &#8212; Volet Roulant ESP32</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a237e 0%,#1976d2 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;}
+    .card{background:#fff;border-radius:16px;padding:40px 36px;max-width:380px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,.35);text-align:center;}
+    .ic{font-size:2.8em;margin-bottom:12px;}
+    h1{color:#1a237e;font-size:1.35em;font-weight:700;margin-bottom:6px;}
+    p.sub{color:#607d8b;font-size:13px;margin-bottom:28px;}
+    input{width:100%;padding:11px 14px;border:1.5px solid #dde3ea;border-radius:8px;font-size:14px;margin-bottom:16px;outline:none;transition:border .2s;box-sizing:border-box;}
+    input:focus{border-color:#1976d2;}
+    button{width:100%;padding:12px;background:linear-gradient(135deg,#1a237e,#1976d2);color:#fff;border:none;border-radius:8px;font-size:14.5px;font-weight:700;cursor:pointer;transition:filter .2s;}
+    button:hover{filter:brightness(1.1);}
+    .err{display:none;color:#c62828;font-size:12.5px;margin-top:14px;background:#ffebee;padding:8px 12px;border-radius:6px;}
+    .err.on{display:block;}
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="ic">&#127968;</div>
+  <h1>Volet Roulant ESP32</h1>
+  <p class="sub">Acc&#232;s s&#233;curis&#233; &#8212; Administrateur</p>
+  <form method="POST" action="/login">
+    <input type="password" name="password" placeholder="Mot de passe administrateur" autofocus autocomplete="current-password">
+    <button type="submit">Se connecter</button>
+  </form>
+  <div class="err" id="errmsg">Mot de passe incorrect. Veuillez r&#233;essayer.</div>
+</div>
+<script>
+if(window.location.search.indexOf('error=1')>=0)document.getElementById('errmsg').classList.add('on');
 </script>
 </body>
 </html>

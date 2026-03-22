@@ -6,6 +6,9 @@
 // ===== BOUTON RESET WIFI (non configurable : bouton BOOT de l'ESP32) =====
 #define RESET_WIFI_BUTTON 0
 
+// ===== MOT DE PASSE ADMIN PAR DÉFAUT (modifiable via l'interface web) =====
+#define DEFAULT_ADMIN_PASSWORD "admin"
+
 // ===== VALEURS PAR DÉFAUT DES BROCHES (modifiables via l'interface web) =====
 #define DEFAULT_WIEGAND_D0         36
 #define DEFAULT_WIEGAND_D1         39
