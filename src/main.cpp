@@ -279,6 +279,7 @@ void loadConfig() {
   
   config.initialized = preferences.getBool("init", false);
   
+  logPrintf("[CFG] adminPassword: %d caractères chargés", strlen(config.adminPassword));
   logPrintf("[CFG] Chargée: Relais=%lums, MQTT=%s:%d",
             config.relayDuration, config.mqttServer, config.mqttPort);
 }

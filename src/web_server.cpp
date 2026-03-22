@@ -70,7 +70,10 @@ void setupWebServer() {
   server.on("/login", HTTP_POST, [](AsyncWebServerRequest *request){
     if (request->hasParam("password", true)) {
       String pwd = request->getParam("password", true)->value();
-      if (strcmp(pwd.c_str(), getValidPassword()) == 0) {
+      pwd.trim();
+      const char* expected = getValidPassword();
+      logPrintf("[WEB] Login: longueur re\u00e7u=%d attendu=%d", pwd.length(), strlen(expected));
+      if (strcmp(pwd.c_str(), expected) == 0) {
         AsyncWebServerResponse *response = request->beginResponse(302, "text/plain", "");
         String cookie = String("session=") + sessionToken + "; HttpOnly; SameSite=Strict; Path=/";
         response->addHeader("Set-Cookie", cookie);
@@ -78,7 +81,7 @@ void setupWebServer() {
         request->send(response);
         return;
       }
-      logMessage("[WEB] Tentative de connexion avec mot de passe erron\u00e9");
+      logPrintf("[WEB] Tentative de connexion avec mot de passe erron\u00e9 (attendu: %d caract\u00e8res)", strlen(expected));
     }
     request->redirect("/login?error=1");
   });
