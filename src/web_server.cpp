@@ -188,17 +188,27 @@ void setupWebServer() {
     }
   );
   
-  // API - Supprimer un code (simple GET avec paramètre)
-  server.on("/api/codes/delete", HTTP_GET, [](AsyncWebServerRequest *request){
+  // API - Supprimer un code (DELETE /api/codes?index=X)
+  server.on("/api/codes", HTTP_DELETE, [](AsyncWebServerRequest *request){
     if (!request->hasParam("index")) {
-      request->send(400, "application/json", "{\"error\":\"Paramètre index manquant\"}");
+      request->send(400, "application/json", "{\"error\":\"Param\\u00e8tre index manquant\"}");
       return;
     }
-    
-    int idx = request->getParam("index")->value().toInt();
-    
+
+    String idxStr = request->getParam("index")->value();
+    // toInt() retourne 0 pour les entrées non-numériques — vérifier que c'est bien un nombre
+    bool valid = idxStr.length() > 0;
+    for (unsigned int k = 0; k < idxStr.length(); k++) {
+      if (!isDigit(idxStr[k])) { valid = false; break; }
+    }
+    if (!valid) {
+      request->send(400, "application/json", "{\"error\":\"Index invalide\"}");
+      return;
+    }
+
+    int idx = idxStr.toInt();
     if (deleteAccessCode(idx)) {
-      request->send(200, "application/json", "{\"message\":\"Code supprimé\"}");
+      request->send(200, "application/json", "{\"message\":\"Code supprim\\u00e9\"}");
     } else {
       request->send(400, "application/json", "{\"error\":\"Index invalide ou erreur lors de la suppression\"}");
     }

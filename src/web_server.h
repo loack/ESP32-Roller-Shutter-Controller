@@ -379,7 +379,7 @@ function loadCodes(){
     document.getElementById('nbc').textContent=codes.length;
     var tn=['Clavier','RFID','Empreinte'];
     document.getElementById('ctb').innerHTML=codes.map(function(c,i){
-      return '<tr><td>'+i+'</td><td>'+esc(c.name)+'</td><td><code>'+c.code+'</code></td><td>'+
+      return '<tr><td>'+i+'</td><td>'+escH(c.name)+'</td><td><code>'+c.code+'</code></td><td>'+
         (tn[c.type]||c.type)+'</td><td>'+(c.active?'<span class="b b-g">Actif</span>':'<span class="b b-r">Inactif</span>')+
         '</td><td><button class="btn btn-d btn-sm" onclick="delCode('+i+')">Suppr.</button></td></tr>';
     }).join('');
@@ -399,7 +399,11 @@ function addCode(){
 }
 
 function delCode(i){
-  fetch('/api/codes/delete?index='+i).then(function(r){return r.json();}).then(function(d){toast(d.message||d.error,!!d.error);loadCodes();}).catch(function(){toast('Erreur réseau lors de la suppression',1);});
+  if(!confirm('Supprimer ce code d\'acc\u00e8s ?')) return;
+  fetch('/api/codes?index='+i,{method:'DELETE'})
+    .then(function(r){return r.json();})
+    .then(function(d){toast(d.message||d.error,!!d.error);loadCodes();})
+    .catch(function(){toast('Erreur r\u00e9seau lors de la suppression',1);});
 }
 
 function loadLogs(){
@@ -501,7 +505,7 @@ function addLog(msg){
 }
 
 function clearTerm(){var el=document.getElementById('tout');if(el)el.innerHTML='';}
-function esc(s){return String(s).replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');}
 function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 function toggleStaticIP(){

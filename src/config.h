@@ -12,11 +12,11 @@
 #define DEFAULT_RELAY_OPEN         21
 #define DEFAULT_RELAY_CLOSE        29
 #define DEFAULT_PHOTO_BARRIER      13
-#define DEFAULT_STATUS_LED         25
+#define DEFAULT_STATUS_LED         2
 #define DEFAULT_READER_LED_RED     14
 #define DEFAULT_READER_LED_GREEN   12
-#define DEFAULT_PIN_UP_SWITCH      25
-#define DEFAULT_PIN_DOWN_SWITCH    26
+#define DEFAULT_PIN_UP_SWITCH      32
+#define DEFAULT_PIN_DOWN_SWITCH    33
 
 // ===== CONFIGURATION DES BROCHES (instance globale définie dans main.cpp) =====
 struct PinConfig {
