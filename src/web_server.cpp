@@ -1,5 +1,6 @@
 #include "web_server.h"
 #include "config.h"
+#include "log_manager.h"
 #include <ElegantOTA.h>
 #include <PubSubClient.h>
 
@@ -9,12 +10,27 @@ extern AccessLog accessLogs[];
 extern int accessCodeCount;
 extern int logIndex;
 extern PubSubClient mqttClient;
+extern bool relayActive;
+extern bool learningMode;
+extern uint8_t learningType;
 
 extern void saveConfig();
 extern void saveAccessCodes();
 extern void activateRelay(bool open);
 extern void deactivateRelay();
 extern bool deleteAccessCode(int index);
+extern void startLearningMode(uint8_t type, const char* name);
+extern void stopLearningMode();
+extern PinConfig pins;
+extern void savePinConfig();
+extern void resetWifiAndRestart();
+
+AsyncWebSocket ws("/ws");
+
+void loopWebSocket() {
+  ws.cleanupClients();
+  flushLogBroadcasts();  // diffuse les logs mis en file depuis les tasks async
+}
 
 void setupWebServer() {
   // Page principale
@@ -26,13 +42,44 @@ void setupWebServer() {
   server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
     JsonDocument doc;
     doc["mqtt"] = mqttClient.connected();
-    doc["barrier"] = digitalRead(PHOTO_BARRIER);
+    doc["barrier"] = digitalRead(pins.photoBarrier);
     doc["wifi"] = WiFi.status() == WL_CONNECTED;
     doc["ip"] = WiFi.localIP().toString();
+    doc["ssid"] = WiFi.SSID();
+    doc["relayActive"] = relayActive;
+    doc["learning"] = learningMode;
+    doc["learningType"] = learningType;
+    doc["authMode"] = config.authMode;
     
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
+  });
+
+  // API - Démarrer mode apprentissage
+  server.on("/api/learn", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      JsonDocument doc;
+      DeserializationError error = deserializeJson(doc, (const char*)data);
+      if (error) {
+        request->send(400, "application/json", "{\"error\":\"JSON invalide\"}");
+        return;
+      }
+      uint8_t type = doc["type"] | 0;
+      const char* name = doc["name"] | "Inconnu";
+      if (type > 2) {
+        request->send(400, "application/json", "{\"error\":\"Type invalide (0-2)\"}");
+        return;
+      }
+      startLearningMode(type, name);
+      request->send(200, "application/json", "{\"message\":\"Mode apprentissage d\u00e9marr\u00e9\"}");
+    }
+  );
+
+  // API - Arrêter mode apprentissage
+  server.on("/api/learn/stop", HTTP_POST, [](AsyncWebServerRequest *request){
+    stopLearningMode();
+    request->send(200, "application/json", "{\"message\":\"Mode apprentissage arr\u00eat\u00e9\"}");
   });
   
   // API - Contrôle relais
@@ -135,9 +182,9 @@ void setupWebServer() {
       accessCodeCount++;
       saveAccessCodes();
       
-      Serial.printf("✓ Code added via web: %s (code=%lu, type=%d)\n", name, code, type);
+      logPrintf("[WEB] Code ajouté: %s (code=%lu, type=%d)", name, code, type);
       
-      request->send(200, "application/json", "{\"message\":\"Code ajouté\"}");
+      request->send(200, "application/json", "{\"message\":\"Code ajout\u00e9\"}");
     }
   );
   
@@ -186,6 +233,11 @@ void setupWebServer() {
     doc["mqttPort"] = config.mqttPort;
     doc["mqttUser"] = config.mqttUser;
     doc["mqttTopic"] = config.mqttTopic;
+    doc["authMode"] = config.authMode;
+    doc["useStaticIP"] = config.useStaticIP;
+    doc["staticIP"] = config.staticIP;
+    doc["staticGateway"] = config.staticGateway;
+    doc["staticSubnet"] = config.staticSubnet;
     
     String response;
     serializeJson(doc, response);
@@ -213,14 +265,111 @@ void setupWebServer() {
       if (doc.containsKey("adminPassword")) 
         strlcpy(config.adminPassword, doc["adminPassword"], 32);
       
+      if (doc["authMode"].is<uint8_t>()) {
+        uint8_t mode = doc["authMode"];
+        if (mode <= 2) config.authMode = mode;
+      }
+
+      if (doc["useStaticIP"].is<bool>())
+        config.useStaticIP = doc["useStaticIP"];
+      if (doc.containsKey("staticIP"))
+        strlcpy(config.staticIP, doc["staticIP"] | "", 16);
+      if (doc.containsKey("staticGateway"))
+        strlcpy(config.staticGateway, doc["staticGateway"] | "", 16);
+      if (doc.containsKey("staticSubnet"))
+        strlcpy(config.staticSubnet, doc["staticSubnet"] | "", 16);
+
       saveConfig();
-      
-      request->send(200, "application/json", "{\"message\":\"Configuration enregistrée\"}");
+
+      request->send(200, "application/json", "{\"message\":\"Configuration enregistrée\", \"restart\":true}");
     }
   );
   
+  // API - Lire la configuration des broches GPIO
+  server.on("/api/pins", HTTP_GET, [](AsyncWebServerRequest *request){
+    JsonDocument doc;
+    doc["wiegandD0"]    = pins.wiegandD0;
+    doc["wiegandD1"]    = pins.wiegandD1;
+    doc["relayOpen"]    = pins.relayOpen;
+    doc["relayClose"]   = pins.relayClose;
+    doc["photoBarrier"] = pins.photoBarrier;
+    doc["statusLed"]    = pins.statusLed;
+    doc["readerLedRed"]   = pins.readerLedRed;
+    doc["readerLedGreen"] = pins.readerLedGreen;
+    doc["pinUpSwitch"]    = pins.pinUpSwitch;
+    doc["pinDownSwitch"]  = pins.pinDownSwitch;
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+  });
+
+  // API - Enregistrer la configuration des broches GPIO
+  server.on("/api/pins", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+      JsonDocument doc;
+      if (deserializeJson(doc, (const char*)data)) {
+        request->send(400, "application/json", "{\"error\":\"JSON invalide\"}");
+        return;
+      }
+      // Valider et appliquer chaque broche (0-39)
+      auto setPin = [&](uint8_t &dest, const char* key) -> bool {
+        if (!doc[key].is<uint8_t>()) return false;
+        uint8_t v = doc[key];
+        if (v > 39) return false;
+        dest = v;
+        return true;
+      };
+      if (!setPin(pins.wiegandD0,    "wiegandD0")    ||
+          !setPin(pins.wiegandD1,    "wiegandD1")    ||
+          !setPin(pins.relayOpen,    "relayOpen")    ||
+          !setPin(pins.relayClose,   "relayClose")   ||
+          !setPin(pins.photoBarrier, "photoBarrier") ||
+          !setPin(pins.statusLed,    "statusLed")    ||
+          !setPin(pins.readerLedRed,   "readerLedRed")   ||
+          !setPin(pins.readerLedGreen, "readerLedGreen") ||
+          !setPin(pins.pinUpSwitch,    "pinUpSwitch")    ||
+          !setPin(pins.pinDownSwitch,  "pinDownSwitch")) {
+        request->send(400, "application/json", "{\"error\":\"Valeur de broche invalide (0-39)\"}");
+        return;
+      }
+      savePinConfig();
+      request->send(200, "application/json", "{\"message\":\"Broches enregistrées\", \"restart\":true}");
+    }
+  );
+
+  // API - Réinitialiser les identifiants WiFi (passe en mode AP)
+  server.on("/api/wifi/reset", HTTP_POST, [](AsyncWebServerRequest *request){
+    request->send(200, "application/json", "{\"message\":\"Réinitialisation WiFi en cours...\"}" );
+    delay(500);
+    resetWifiAndRestart();
+  });
+
+  // API - Redémarrer l'ESP32
+  server.on("/api/restart", HTTP_POST, [](AsyncWebServerRequest *request){
+    request->send(200, "application/json", "{\"message\":\"Redémarrage en cours...\"}");
+    delay(1000);
+    ESP.restart();
+  });
+
   // ElegantOTA pour les mises à jour
   ElegantOTA.begin(&server);
-  
-  Serial.println("Web server routes configured");
+
+  // WebSocket
+  ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client,
+                AwsEventType type, void *arg, uint8_t *data, size_t len) {
+    if (type == WS_EVT_CONNECT) {
+      // Envoyer l'historique des logs au nouveau client
+      sendLogHistory([client](const String& json) {
+        client->text(json);
+      });
+    }
+  });
+  server.addHandler(&ws);
+
+  // Enregistrer le callback de diffusion des logs vers WebSocket
+  setLogBroadcastCallback([](const String& json) {
+    ws.textAll(json);
+  });
+
+  logMessage("[WEB] Serveur HTTP + WebSocket prêt");
 }

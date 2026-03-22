@@ -9,6 +9,7 @@
 #include "config.h"
 #include "access_control.h"
 #include "wiegand_handler.h"
+#include "log_manager.h"
 
 // Bouton pour reset WiFi (bouton BOOT sur ESP32)
 #define RESET_WIFI_BUTTON 0
@@ -21,6 +22,7 @@ Preferences preferences;
 WiFiManager wifiManager;
 
 Config config;
+PinConfig pins;
 unsigned long relayStartTime = 0;
 bool relayActive = false;
 unsigned long lastMqttReconnect = 0;
@@ -28,6 +30,9 @@ unsigned long lastMqttReconnect = 0;
 // ===== PROTOTYPES =====
 void loadConfig();
 void saveConfig();
+void loadPinConfig();
+void savePinConfig();
+void resetWifiAndRestart();
 void activateRelay(bool open);
 void deactivateRelay();
 bool checkTriplePress();
@@ -35,6 +40,7 @@ void handleManualSwitches();
 
 // Fonctions externes (web + MQTT)
 void setupWebServer();
+void loopWebSocket();
 void setupMQTT();
 void reconnectMQTT();
 void publishMQTT(const char* topic, const char* payload);
@@ -45,8 +51,7 @@ bool checkTriplePress() {
   unsigned long startTime = millis();
   bool lastState = HIGH;
   
-  Serial.println("\n⏱ WiFi Reset Check (10 seconds window)...");
-  Serial.println("Press BOOT button 3 times to reset WiFi credentials");
+  logMessage("[WIFI] Vérification reset (10s) - appuyez 3x sur BOOT pour effacer les identifiants");
   
   while (millis() - startTime < 10000) {  // 10 secondes
     bool currentState = digitalRead(RESET_WIFI_BUTTON);
@@ -54,10 +59,10 @@ bool checkTriplePress() {
     // Détection front descendant (appui)
     if (lastState == HIGH && currentState == LOW) {
       pressCount++;
-      Serial.printf("✓ Press %d/3 detected\n", pressCount);
+      logPrintf("[WIFI] Appui %d/3 détecté", pressCount);
       
       if (pressCount >= 3) {
-        Serial.println("\n🔥 Triple press detected!");
+        logMessage("[WIFI] Triple appui détecté !");
         return true;
       }
       
@@ -69,9 +74,8 @@ bool checkTriplePress() {
   }
   
   if (pressCount > 0) {
-    Serial.printf("Only %d press(es) detected. Reset cancelled.\n", pressCount);
+    logPrintf("[WIFI] %d appui(s) détecté(s), reset annulé", pressCount);
   }
-  Serial.println("No reset requested. Continuing...\n");
   return false;
 }
 
@@ -80,29 +84,36 @@ void setup() {
   Serial.begin(115200);
   delay(1000);  // Attendre la stabilisation du port série
   
-  Serial.println("\n\n=== ESP32 Roller Shutter Controller ===");
-  Serial.println("Version 1.0 - With Wiegand, RFID & Fingerprint");
-  Serial.println("Chip ID: " + String((uint32_t)ESP.getEfuseMac(), HEX));
-  Serial.println("SDK Version: " + String(ESP.getSdkVersion()));
-  
-  // Configuration des pins
-  pinMode(RELAY_OPEN, OUTPUT);
-  pinMode(RELAY_CLOSE, OUTPUT);
-  pinMode(PHOTO_BARRIER, INPUT_PULLUP);
-  pinMode(STATUS_LED, OUTPUT);
-  pinMode(RESET_WIFI_BUTTON, INPUT_PULLUP);
-  pinMode(READER_LED_RED, OUTPUT);
-  pinMode(READER_LED_GREEN, OUTPUT);
-  
-  digitalWrite(RELAY_OPEN, LOW);
-  digitalWrite(RELAY_CLOSE, LOW);
-  digitalWrite(STATUS_LED, LOW);
-  digitalWrite(READER_LED_RED, LOW);
-  digitalWrite(READER_LED_GREEN, LOW);
+  initLogManager();
 
-    // Initialisation des interrupteurs manuels
-  pinMode(PIN_UP_SWITCH, INPUT_PULLUP);
-  pinMode(PIN_DOWN_SWITCH, INPUT_PULLUP);
+  logMessage("\n=== ESP32 Roller Shutter Controller ===");
+  logMessage("Version 1.0 - With Wiegand, RFID & Fingerprint");
+  logPrintf("[SYS] Chip ID: %08X", (uint32_t)ESP.getEfuseMac());
+  logPrintf("[SYS] SDK: %s", ESP.getSdkVersion());
+
+  // ===== CHARGEMENT ANTICIPÉ DE LA CONFIG (nécéssaire avant WiFi) =====
+  preferences.begin("roller", false);
+  loadPinConfig();
+  loadConfig();
+
+  // Configuration des pins (numéros chargés depuis la flash)
+  pinMode(pins.relayOpen, OUTPUT);
+  pinMode(pins.relayClose, OUTPUT);
+  pinMode(pins.photoBarrier, INPUT_PULLUP);
+  pinMode(pins.statusLed, OUTPUT);
+  pinMode(RESET_WIFI_BUTTON, INPUT_PULLUP);
+  pinMode(pins.readerLedRed, OUTPUT);
+  pinMode(pins.readerLedGreen, OUTPUT);
+
+  digitalWrite(pins.relayOpen, LOW);
+  digitalWrite(pins.relayClose, LOW);
+  digitalWrite(pins.statusLed, LOW);
+  digitalWrite(pins.readerLedRed, LOW);
+  digitalWrite(pins.readerLedGreen, LOW);
+
+  // Initialisation des interrupteurs manuels
+  pinMode(pins.pinUpSwitch, INPUT_PULLUP);
+  pinMode(pins.pinDownSwitch, INPUT_PULLUP);
   
   // ===== CONFIGURATION WiFi EN PREMIER =====
   // Configuration WiFiManager (AVANT les paramètres WiFi)
@@ -113,46 +124,48 @@ void setup() {
   
   // Vérifier triple appui pour reset WiFi
   if (checkTriplePress()) {
-    Serial.println("\n⚠⚠⚠ RESETTING WiFi credentials ⚠⚠⚠");
+    logMessage("[WIFI] Réinitialisation des identifiants WiFi...");
     wifiManager.resetSettings();
-    delay(1000);
-    Serial.println("Credentials erased. Restarting...");
     delay(2000);
     ESP.restart();
   }
-  
-  // Tentative de connexion WiFi
-  Serial.println("\n⏱ Starting WiFi configuration...");
-  Serial.println("If no saved credentials, access point will start:");
-  Serial.println("SSID: ESP32-Roller-Setup");
-  Serial.println("No password required");
-  Serial.println("Connect and configure WiFi at: http://192.168.4.1\n");
-  
+  logMessage("[WIFI] Démarrage de la connexion... (AP: ESP32-Roller-Setup si pas de config)");
+
+  // Appliquer l'IP fixe avant connexion (si configurée)
+  if (config.useStaticIP && strlen(config.staticIP) > 0) {
+    IPAddress ip, gw, sn;
+    if (ip.fromString(config.staticIP) &&
+        gw.fromString(config.staticGateway) &&
+        sn.fromString(config.staticSubnet)) {
+      WiFi.config(ip, gw, sn);
+      logPrintf("[WIFI] IP fixe: %s / GW: %s / Masque: %s",
+               config.staticIP, config.staticGateway, config.staticSubnet);
+    } else {
+      logMessage("[WIFI] IP fixe invalide — utilisation DHCP");
+    }
+  }
+
   // Configuration WiFi pour compatibilité Freebox (juste avant autoConnect)
   WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Réduire la puissance pour éviter les timeouts
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
   
-  digitalWrite(STATUS_LED, HIGH);
+  digitalWrite(pins.statusLed, HIGH);
   
   if (!wifiManager.autoConnect("ESP32-Roller-Setup")) {
-    Serial.println("\n✗✗✗ WiFiManager failed to connect ✗✗✗");
-    Serial.println("Restarting in 5 seconds...");
-    digitalWrite(STATUS_LED, LOW);
+    logMessage("[WIFI] Connexion échouée, redémarrage...");
+    digitalWrite(pins.statusLed, LOW);
     delay(5000);
     ESP.restart();
   }
-  
+
   // Connexion réussie
-  Serial.println("\n✓✓✓ WiFi CONNECTED ✓✓✓");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("Gateway: ");
-  Serial.println(WiFi.gatewayIP());
-  Serial.print("RSSI: ");
-  Serial.print(WiFi.RSSI());
-  Serial.println(" dBm");
-  digitalWrite(STATUS_LED, LOW);
+  logMessage("[WIFI] Connecté !");
+  logPrintf("[WIFI] IP: %s", WiFi.localIP().toString().c_str());
+  logPrintf("[WIFI] Passerelle: %s", WiFi.gatewayIP().toString().c_str());
+  logPrintf("[WIFI] RSSI: %d dBm", WiFi.RSSI());
+  logPrintf("[WIFI] SSID: %s", WiFi.SSID().c_str());
+  digitalWrite(pins.statusLed, LOW);
   
   // Arrêter le serveur de configuration WiFiManager pour libérer le port 80
   wifiManager.stopConfigPortal();
@@ -161,24 +174,19 @@ void setup() {
   // ===== INITIALISATION DES AUTRES COMPOSANTS =====
   setupWiegand();
 
-  preferences.begin("roller", false);
-  loadConfig();
+  // preferences déjà ouvertes (appelées en début de setup)
   loadAccessCodes();
 
   setupWebServer();
   setupMQTT();
 
   server.begin();
-  Serial.println("✓ Web server started");
-  Serial.println("\n========================================");
-  Serial.println("Access the web interface at:");
-  Serial.print("http://"); Serial.println(WiFi.localIP());
-  Serial.println("========================================\n");
+  logMessage("[WEB] Serveur démarré sur http://" + WiFi.localIP().toString());
 
   for (int i = 0; i < 3; i++) {
-    digitalWrite(STATUS_LED, HIGH);
+    digitalWrite(pins.statusLed, HIGH);
     delay(200);
-    digitalWrite(STATUS_LED, LOW);
+    digitalWrite(pins.statusLed, LOW);
     delay(200);
   }
 }
@@ -189,12 +197,12 @@ void handleManualSwitches() {
   const unsigned long debounceDelay = 200;
 
   if (millis() - lastPressTime > debounceDelay) {
-    if (digitalRead(PIN_UP_SWITCH) == LOW) {
-      Serial.println("Manual switch: OPEN");
+    if (digitalRead(pins.pinUpSwitch) == LOW) {
+      logMessage("[SW] Interrupteur manuel: OUVRIR");
       activateRelay(true);
       lastPressTime = millis();
-    } else if (digitalRead(PIN_DOWN_SWITCH) == LOW) {
-      Serial.println("Manual switch: CLOSE");
+    } else if (digitalRead(pins.pinDownSwitch) == LOW) {
+      logMessage("[SW] Interrupteur manuel: FERMER");
       activateRelay(false);
       lastPressTime = millis();
     }
@@ -203,12 +211,14 @@ void handleManualSwitches() {
 
 // ===== LOOP =====
 void loop() {
+  loopWebSocket();
+
   // Vérification connexion WiFi
   static unsigned long lastWiFiCheck = 0;
   if (millis() - lastWiFiCheck > 30000) {  // Toutes les 30 secondes
     lastWiFiCheck = millis();
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("⚠ WiFi disconnected! Reconnecting...");
+      logMessage("[WIFI] Déconnecté, tentative de reconnexion...");
       WiFi.reconnect();
     }
   }
@@ -223,8 +233,8 @@ void loop() {
   
   // Vérification barrière photoélectrique
   if (config.photoBarrierEnabled && relayActive) {
-    if (digitalRead(PHOTO_BARRIER) == LOW) {  // Barrière coupée
-      Serial.println("⚠ Photo barrier triggered! Stopping relay.");
+    if (digitalRead(pins.photoBarrier) == LOW) {  // Barrière coupée
+      logMessage("[RELAY] Barrière photo déclenchée, arrêt du relais");
       deactivateRelay();
       publishMQTT("status", "{\"event\":\"barrier_triggered\"}");
     }
@@ -256,14 +266,21 @@ void loadConfig() {
   preferences.getString("mqttPass", config.mqttPassword, sizeof(config.mqttPassword));
   preferences.getString("mqttTop", config.mqttTopic, sizeof(config.mqttTopic));
   preferences.getString("adminPw", config.adminPassword, sizeof(config.adminPassword));
+  config.authMode = preferences.getUChar("authMode", AUTH_MODE_RFID_ONLY);
+  config.useStaticIP = preferences.getBool("useStaticIP", false);
+  preferences.getString("staticIP",  config.staticIP,      sizeof(config.staticIP));
+  preferences.getString("staticGW",  config.staticGateway, sizeof(config.staticGateway));
+  preferences.getString("staticSN",  config.staticSubnet,  sizeof(config.staticSubnet));
   
   if (strlen(config.mqttTopic) == 0) strcpy(config.mqttTopic, "roller");
   if (strlen(config.adminPassword) == 0) strcpy(config.adminPassword, "admin");
+  if (strlen(config.staticSubnet) == 0) strcpy(config.staticSubnet, "255.255.255.0");
+  if (config.authMode > 2) config.authMode = AUTH_MODE_RFID_ONLY;
   
   config.initialized = preferences.getBool("init", false);
   
-  Serial.printf("✓ Config loaded: Relay=%lums, MQTT=%s:%d\n", 
-                config.relayDuration, config.mqttServer, config.mqttPort);
+  logPrintf("[CFG] Chargée: Relais=%lums, MQTT=%s:%d",
+            config.relayDuration, config.mqttServer, config.mqttPort);
 }
 
 void saveConfig() {
@@ -275,27 +292,33 @@ void saveConfig() {
   preferences.putString("mqttPass", config.mqttPassword);
   preferences.putString("mqttTop", config.mqttTopic);
   preferences.putString("adminPw", config.adminPassword);
+  preferences.putUChar("authMode", config.authMode);
+  preferences.putBool("useStaticIP", config.useStaticIP);
+  preferences.putString("staticIP",  config.staticIP);
+  preferences.putString("staticGW",  config.staticGateway);
+  preferences.putString("staticSN",  config.staticSubnet);
   preferences.putBool("init", true);
   
-  Serial.println("✓ Config saved to flash");
+  const char* authNames[] = {"PIN seul", "RFID seul", "PIN+RFID"};
+  logPrintf("[CFG] Enregistrée en flash (mode auth: %s)", authNames[config.authMode]);
 }
 
 // ===== FONCTIONS RELAIS =====
 void activateRelay(bool open) {
   // SÉCURITÉ 1: Ne jamais activer les 2 relais simultanément !
-  digitalWrite(RELAY_OPEN, LOW);
-  digitalWrite(RELAY_CLOSE, LOW);
+  digitalWrite(pins.relayOpen, LOW);
+  digitalWrite(pins.relayClose, LOW);
   delay(100);  // Pause de sécurité
   
   // SÉCURITÉ 2: Vérifier que l'autre relais est bien OFF
   if (open) {
-    if (digitalRead(RELAY_CLOSE) == HIGH) {
-      Serial.println("⚠ ERREUR: RELAY_CLOSE encore actif!");
+    if (digitalRead(pins.relayClose) == HIGH) {
+      logMessage("[RELAY] ERREUR sécurité: RELAY_CLOSE encore actif!");
       return;
     }
   } else {
-    if (digitalRead(RELAY_OPEN) == HIGH) {
-      Serial.println("⚠ ERREUR: RELAY_OPEN encore actif!");
+    if (digitalRead(pins.relayOpen) == HIGH) {
+      logMessage("[RELAY] ERREUR sécurité: RELAY_OPEN encore actif!");
       return;
     }
   }
@@ -305,12 +328,11 @@ void activateRelay(bool open) {
     delay(100);
   }
   
-  digitalWrite(open ? RELAY_OPEN : RELAY_CLOSE, HIGH);
+  digitalWrite(open ? pins.relayOpen : pins.relayClose, HIGH);
   relayStartTime = millis();
   relayActive = true;
   
-  Serial.printf("⚡ Relay activated: %s for %lums\n", 
-                open ? "OPEN" : "CLOSE", config.relayDuration);
+  logPrintf("[RELAY] Activé: %s pour %lums", open ? "OUVRIR" : "FERMER", config.relayDuration);
   
   char payload[128];
   snprintf(payload, sizeof(payload), 
@@ -320,11 +342,57 @@ void activateRelay(bool open) {
 }
 
 void deactivateRelay() {
-  digitalWrite(RELAY_OPEN, LOW);
-  digitalWrite(RELAY_CLOSE, LOW);
+  digitalWrite(pins.relayOpen, LOW);
+  digitalWrite(pins.relayClose, LOW);
   relayActive = false;
   
-  Serial.println("⚡ Relay deactivated");
+  logMessage("[RELAY] Désactivé");
   publishMQTT("relay", "{\"action\":\"stopped\"}");
+}
+
+// ===== CONFIGURATION DES BROCHES =====
+void loadPinConfig() {
+  pins.wiegandD0      = preferences.getUChar("pin_wgD0", DEFAULT_WIEGAND_D0);
+  pins.wiegandD1      = preferences.getUChar("pin_wgD1", DEFAULT_WIEGAND_D1);
+  pins.relayOpen      = preferences.getUChar("pin_rlOp", DEFAULT_RELAY_OPEN);
+  pins.relayClose     = preferences.getUChar("pin_rlCl", DEFAULT_RELAY_CLOSE);
+  pins.photoBarrier   = preferences.getUChar("pin_phBr", DEFAULT_PHOTO_BARRIER);
+  pins.statusLed      = preferences.getUChar("pin_stLd", DEFAULT_STATUS_LED);
+  pins.readerLedRed   = preferences.getUChar("pin_rlR",  DEFAULT_READER_LED_RED);
+  pins.readerLedGreen = preferences.getUChar("pin_rlG",  DEFAULT_READER_LED_GREEN);
+  pins.pinUpSwitch    = preferences.getUChar("pin_upSw", DEFAULT_PIN_UP_SWITCH);
+  pins.pinDownSwitch  = preferences.getUChar("pin_dwSw", DEFAULT_PIN_DOWN_SWITCH);
+
+  logPrintf("[PIN] WG(%d,%d) Relay(%d,%d) Photo:%d LED:%d R:%d G:%d SW(%d,%d)",
+            pins.wiegandD0, pins.wiegandD1, pins.relayOpen, pins.relayClose,
+            pins.photoBarrier, pins.statusLed, pins.readerLedRed, pins.readerLedGreen,
+            pins.pinUpSwitch, pins.pinDownSwitch);
+}
+
+void savePinConfig() {
+  preferences.putUChar("pin_wgD0", pins.wiegandD0);
+  preferences.putUChar("pin_wgD1", pins.wiegandD1);
+  preferences.putUChar("pin_rlOp", pins.relayOpen);
+  preferences.putUChar("pin_rlCl", pins.relayClose);
+  preferences.putUChar("pin_phBr", pins.photoBarrier);
+  preferences.putUChar("pin_stLd", pins.statusLed);
+  preferences.putUChar("pin_rlR",  pins.readerLedRed);
+  preferences.putUChar("pin_rlG",  pins.readerLedGreen);
+  preferences.putUChar("pin_upSw", pins.pinUpSwitch);
+  preferences.putUChar("pin_dwSw", pins.pinDownSwitch);
+  logMessage("[PIN] Configuration des broches enregistrée (red\u00e9marrage requis)");
+}
+
+// ===== RESET WIFI =====
+void resetWifiAndRestart() {
+  logMessage("[WIFI] Réinitialisation des identifiants WiFi...");
+  config.useStaticIP = false;
+  config.staticIP[0] = '\0';
+  config.staticGateway[0] = '\0';
+  config.staticSubnet[0] = '\0';
+  saveConfig();
+  wifiManager.resetSettings();
+  delay(1000);
+  ESP.restart();
 }
 

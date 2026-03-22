@@ -1,6 +1,7 @@
 #include "access_control.h"
 #include <Preferences.h>
 #include "config.h"
+#include "log_manager.h"
 
 // ===== VARIABLES GLOBALES =====
 AccessCode accessCodes[50];
@@ -28,7 +29,7 @@ void loadAccessCodes() {
     preferences.getBytes(key.c_str(), &accessCodes[i], sizeof(AccessCode));
   }
 
-  Serial.printf("✓ Loaded %d access codes from flash\n", accessCodeCount);
+  logPrintf("[AC] %d codes chargés depuis la flash", accessCodeCount);
 }
 
 void saveAccessCodes() {
@@ -39,7 +40,7 @@ void saveAccessCodes() {
     preferences.putBytes(key.c_str(), &accessCodes[i], sizeof(AccessCode));
   }
 
-  Serial.printf("✓ Saved %d access codes to flash\n", accessCodeCount);
+  logPrintf("[AC] %d codes enregistrés en flash", accessCodeCount);
 }
 
 // ===== VÉRIFICATION CODE =====
@@ -48,7 +49,7 @@ bool checkAccessCode(uint32_t code, uint8_t type) {
     if (accessCodes[i].active &&
         accessCodes[i].code == code &&
         accessCodes[i].type == type) {
-      Serial.printf("✓ Code match found: %s (index %d)\n", accessCodes[i].name, i);
+      logPrintf("[AC] Code trouvé: %s (index %d)", accessCodes[i].name, i);
       return true;
     }
   }
@@ -64,20 +65,20 @@ void addAccessLog(uint32_t code, bool granted, uint8_t type) {
 
   logIndex = (logIndex + 1) % 100;
 
-  Serial.printf("Access log: code=%lu, granted=%d, type=%d\n", code, granted, type);
+  logPrintf("[AC] Log accès: code=%lu, accordé=%d, type=%d", code, granted, type);
 }
 
 // ===== AJOUT / SUPPRESSION DE CODES =====
 bool addNewAccessCode(uint32_t code, uint8_t type, const char* name) {
   for (int i = 0; i < accessCodeCount; i++) {
     if (accessCodes[i].code == code && accessCodes[i].type == type) {
-      Serial.printf("⚠ Code already exists: %lu (type %d)\n", code, type);
+      logPrintf("[AC] Code existant: %lu (type %d)", code, type);
       return false;
     }
   }
 
   if (accessCodeCount >= 50) {
-    Serial.println("✗ Access codes list full (max 50)");
+    logMessage("[AC] Liste pleine (max 50)");
     return false;
   }
 
@@ -90,7 +91,7 @@ bool addNewAccessCode(uint32_t code, uint8_t type, const char* name) {
   accessCodeCount++;
   saveAccessCodes();
 
-  Serial.printf("✓ New access code added: %s (code=%lu, type=%d)\n", name, code, type);
+  logPrintf("[AC] Nouveau code ajouté: %s (code=%lu, type=%d)", name, code, type);
 
   char payload[256];
   snprintf(payload, sizeof(payload),
@@ -111,7 +112,7 @@ bool removeAccessCode(uint32_t code, uint8_t type) {
   }
 
   if (foundIndex == -1) {
-    Serial.printf("⚠ Code not found: %lu (type %d)\n", code, type);
+    logPrintf("[AC] Code introuvable: %lu (type %d)", code, type);
     return false;
   }
 
@@ -125,7 +126,7 @@ bool removeAccessCode(uint32_t code, uint8_t type) {
   accessCodeCount--;
   saveAccessCodes();
 
-  Serial.printf("✓ Access code removed: %s (code=%lu, type=%d)\n", removedName, code, type);
+  logPrintf("[AC] Code supprimé: %s (code=%lu, type=%d)", removedName, code, type);
 
   char payload[256];
   snprintf(payload, sizeof(payload),
@@ -138,7 +139,7 @@ bool removeAccessCode(uint32_t code, uint8_t type) {
 
 bool deleteAccessCode(int index) {
   if (index < 0 || index >= accessCodeCount) {
-    Serial.printf("⚠ Invalid index for deletion: %d\n", index);
+    logPrintf("[AC] Index invalide pour suppression: %d", index);
     return false;
   }
 
@@ -154,15 +155,12 @@ bool deleteAccessCode(int index) {
   accessCodeCount--;
   saveAccessCodes();
 
-  Serial.printf("✓ Access code removed at index %d: %s (code=%lu, type=%d)\n",
-                index, removedName, removedCode, removedType);
+  logPrintf("[AC] Code supprimé (index %d): %s (code=%lu, type=%d)",
+            index, removedName, removedCode, removedType);
 
-  char payload[256];
-  snprintf(payload, sizeof(payload),
-           "{\"action\":\"removed\",\"code\":%lu,\"type\":%d,\"name\":\"%s\",\"total\":%d}",
-           removedCode, removedType, removedName, accessCodeCount);
-  publishMQTT("codes", payload);
-
+  // publishMQTT est appelé uniquement si la fonction est appelée depuis
+  // le contexte principal (loop). Depuis le handler HTTP (task async),
+  // on ne publie pas pour éviter un accès concurrent au client MQTT.
   return true;
 }
 
@@ -174,17 +172,7 @@ void startLearningMode(uint8_t type, const char* name) {
   learningName = String(name);
 
   const char* typeNames[] = {"Keypad", "RFID", "Fingerprint"};
-  Serial.printf("\n🎓 LEARNING MODE activated for %s\n", typeNames[type]);
-  Serial.printf("Name: %s\n", name);
-  Serial.println("Waiting for input... (60 seconds)");
-
-  // Clignoter STATUS_LED pour signaler le mode apprentissage
-  for (int i = 0; i < 5; i++) {
-    digitalWrite(STATUS_LED, HIGH);
-    delay(100);
-    digitalWrite(STATUS_LED, LOW);
-    delay(100);
-  }
+  logPrintf("[AC] MODE APPRENTISSAGE activé pour %s - nom: %s", typeNames[type], name);
 
   char payload[256];
   snprintf(payload, sizeof(payload),
@@ -196,7 +184,7 @@ void startLearningMode(uint8_t type, const char* name) {
 void stopLearningMode() {
   if (learningMode) {
     learningMode = false;
-    Serial.println("🎓 LEARNING MODE deactivated\n");
+    logMessage("[AC] Mode apprentissage désactivé");
     publishMQTT("status", "{\"learning\":false}");
   }
 }

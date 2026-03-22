@@ -3,19 +3,36 @@
 
 #include <Arduino.h>
 
-// ===== CONFIGURATION PINS =====
-#define WIEGAND_D0        36  // pink
-#define WIEGAND_D1        39  //brown
-#define RELAY_OPEN        21
-#define RELAY_CLOSE       29
-#define PHOTO_BARRIER     13
-#define STATUS_LED        25
-#define READER_LED_RED    14  // LED rouge du lecteur
-#define READER_LED_GREEN  12  // LED verte du lecteur
+// ===== BOUTON RESET WIFI (non configurable : bouton BOOT de l'ESP32) =====
+#define RESET_WIFI_BUTTON 0
 
-// Broches pour les interrupteurs manuels
-#define PIN_UP_SWITCH 25
-#define PIN_DOWN_SWITCH 26
+// ===== VALEURS PAR DÉFAUT DES BROCHES (modifiables via l'interface web) =====
+#define DEFAULT_WIEGAND_D0         36
+#define DEFAULT_WIEGAND_D1         39
+#define DEFAULT_RELAY_OPEN         21
+#define DEFAULT_RELAY_CLOSE        29
+#define DEFAULT_PHOTO_BARRIER      13
+#define DEFAULT_STATUS_LED         25
+#define DEFAULT_READER_LED_RED     14
+#define DEFAULT_READER_LED_GREEN   12
+#define DEFAULT_PIN_UP_SWITCH      25
+#define DEFAULT_PIN_DOWN_SWITCH    26
+
+// ===== CONFIGURATION DES BROCHES (instance globale définie dans main.cpp) =====
+struct PinConfig {
+  uint8_t wiegandD0;
+  uint8_t wiegandD1;
+  uint8_t relayOpen;
+  uint8_t relayClose;
+  uint8_t photoBarrier;
+  uint8_t statusLed;
+  uint8_t readerLedRed;
+  uint8_t readerLedGreen;
+  uint8_t pinUpSwitch;
+  uint8_t pinDownSwitch;
+};
+
+extern PinConfig pins;
 
 // ===== STRUCTURES =====
 struct AccessCode {
@@ -24,6 +41,11 @@ struct AccessCode {
   char name[32];
   bool active;
 };
+
+// Modes d'identification
+#define AUTH_MODE_PIN_ONLY    0  // Code PIN long seul (clavier)
+#define AUTH_MODE_RFID_ONLY   1  // Badge RFID seul
+#define AUTH_MODE_PIN_RFID    2  // Badge RFID + Code PIN (2FA)
 
 struct Config {
   unsigned long relayDuration;
@@ -34,6 +56,12 @@ struct Config {
   char mqttPassword[32];
   char mqttTopic[64];
   char adminPassword[32];
+  uint8_t authMode;      // AUTH_MODE_PIN_ONLY / AUTH_MODE_RFID_ONLY / AUTH_MODE_PIN_RFID
+  // Réseau WiFi
+  bool useStaticIP;
+  char staticIP[16];
+  char staticGateway[16];
+  char staticSubnet[16];
   bool initialized;
 };
 
