@@ -4,12 +4,12 @@
 #include <Arduino.h>
 
 // ===== CONFIGURATION PINS =====
-#define WIEGAND_D0        32
-#define WIEGAND_D1        33
-#define RELAY_OPEN        16
-#define RELAY_CLOSE       17
+#define WIEGAND_D0        36  // pink
+#define WIEGAND_D1        39  //brown
+#define RELAY_OPEN        21
+#define RELAY_CLOSE       29
 #define PHOTO_BARRIER     13
-#define STATUS_LED        2
+#define STATUS_LED        25
 #define READER_LED_RED    14  // LED rouge du lecteur
 #define READER_LED_GREEN  12  // LED verte du lecteur
 

@@ -47,10 +47,10 @@ ESP32 Pin     →  Composant
 ─────────────────────────────
 GPIO 32       →  Wiegand D0 (PINK)
 GPIO 33       →  Wiegand D1 (BROWN)
-GPIO 25       →  Relais OUVERTURE
-GPIO 26       →  Relais FERMETURE
+GPIO 25       →  Relais OUVERTURE  / à modifier
+GPIO 26       →  Relais FERMETURE  / à modifier pour lyligo
 GPIO 27       →  Barrière photoélectrique
-GPIO 2        →  LED de statut
+GPIO 2        →  LED de statut  / 25 sur lilygo
 ```
 
 ## 🚀 Installation
@@ -67,6 +67,28 @@ pio run --target upload
 # Moniteur série
 pio device monitor
 ```
+
+### 1.b Configuration spécifique LilyGO T-Relay
+
+Si vous utilisez une **LilyGO T-Relay** avec le dongle **T-U2T**:
+
+1. Bien définir le port série dans `platformio.ini` pour éviter les erreurs de flash.
+
+```ini
+[env:freenove_esp32_wrover]
+upload_port = COM7
+monitor_port = COM7
+monitor_speed = 115200
+```
+
+2. Avec le dongle USB **T-U2T**, le passage en mode bootloader est généralement automatique pendant l'upload.
+3. En cas de blocage sur `Connecting...`, vérifier le port COM actif et relancer l'upload.
+
+### 1.c Câblage Wiegand sur T-Relay
+
+- Connecter `D0` et `D1` du lecteur Wiegand sur les GPIO configurés dans le firmware (par défaut `GPIO32` et `GPIO33`).
+- Beaucoup de lecteurs Wiegand 12V sortent des signaux logiques proches de 5V.
+- Certains montages fonctionnent directement, mais l'ESP32 n'est pas officiellement 5V tolerant sur ses GPIO: pour une installation fiable, utiliser un abaisseur de niveau (ou diviseur resistif) vers 3.3V.
 
 ### 2. Configuration initiale
 
