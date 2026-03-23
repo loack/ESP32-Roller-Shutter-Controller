@@ -22,6 +22,11 @@ static uint32_t     authPendingCode = 0;       // code du 1er facteur
 static unsigned long authPendingTime = 0;
 const  unsigned long AUTH_PENDING_TIMEOUT = 30000;  // 30 secondes
 
+// Filtre anti-parasite : timestamp de la dernière trame RFID reçue
+// Certains lecteurs envoient une trame 4-bit (LED/buzzer) juste après un badge
+static unsigned long lastRfidEvent = 0;
+const  unsigned long RFID_KEYPAD_INHIBIT = 500;  // ignore clavier 500ms après un badge
+
 // ===== INITIALISATION =====
 void setupWiegand() {
   wg.begin(pins.wiegandD0, pins.wiegandD1);
@@ -142,6 +147,11 @@ void processKeypadCode() {
 
 // ===== GESTION TOUCHE CLAVIER (4 BITS) =====
 static void handleKeypadEvent(uint32_t code) {
+  // Ignorer les trames clavier qui arrivent juste après un badge (commandes LED/buzzer du lecteur)
+  if (millis() - lastRfidEvent < RFID_KEYPAD_INHIBIT) {
+    logPrintf("[WG][KEYPAD] Trame 4-bit ignorée (post-RFID inhibit): raw=%lu", code);
+    return;
+  }
   lastKeypadInput = millis();
   logPrintf("[WG][KEYPAD] Touche: raw=%lu, key=%s", code, getKeypadKeyLabel(code));
 
@@ -296,10 +306,12 @@ static void handleWiegand26(uint32_t code) {
   }
 }
 
-// ===== GESTION BADGE RFID 32/34+ BITS =====
-static void handleWiegandRfid(uint32_t code, uint8_t bitCount) {
-  const char* label = (bitCount == 34) ? "WG34" : (bitCount == 32 ? "WG32" : "WG32+");
-  logPrintf("[WG] Badge RFID %s: %lu (0x%X) - %u bits", label, code, code, bitCount);
+// ===== GESTION BADGE RFID 34 BITS (WG34 : 1 + 16 facility + 16 card + 1 parité) =====
+static void handleWiegand34(uint32_t code) {
+  uint16_t facilityCode = (code >> 16) & 0xFFFF;
+  uint16_t cardNumber   = code & 0xFFFF;
+  logPrintf("[WG] Badge RFID WG34: UID=%lu (0x%08X) | facility=%u | card=%u",
+            code, code, facilityCode, cardNumber);
 
   if (learningMode && learningType == 1) {
     addNewAccessCode(code, 1, learningName.c_str());
@@ -310,7 +322,7 @@ static void handleWiegandRfid(uint32_t code, uint8_t bitCount) {
 
   // AUTH MODE 0 : PIN seul — badge ignoré
   if (config.authMode == AUTH_MODE_PIN_ONLY) {
-    logMessage("[WG] Mode PIN seul - badge ignoré");
+    logMessage("[WG] Mode PIN seul - badge WG34 ignoré");
     blinkReaderLED(false);
     return;
   }
@@ -320,19 +332,21 @@ static void handleWiegandRfid(uint32_t code, uint8_t bitCount) {
     bool granted = checkAccessCode(code, 1);
     addAccessLog(code, granted, 1);
     if (granted) {
-      logPrintf("[WG] RFID %s AUTORISE", label);
+      logMessage("[WG] RFID WG34 AUTORISE");
       blinkReaderLED(true);
       activateRelay(true);
-      char payload[128];
+      char payload[192];
       snprintf(payload, sizeof(payload),
-               "{\"code\":%lu,\"granted\":true,\"type\":\"rfid\",\"bits\":%u}", code, bitCount);
+               "{\"uid\":%lu,\"facility_code\":%u,\"card_number\":%u,\"granted\":true,\"type\":\"rfid\",\"bits\":34}",
+               code, facilityCode, cardNumber);
       publishMQTT("access", payload);
     } else {
-      logPrintf("[WG] RFID %s REFUSE", label);
+      logMessage("[WG] RFID WG34 REFUSE");
       blinkReaderLED(false);
-      char payload[128];
+      char payload[192];
       snprintf(payload, sizeof(payload),
-               "{\"code\":%lu,\"granted\":false,\"type\":\"rfid\",\"bits\":%u}", code, bitCount);
+               "{\"uid\":%lu,\"facility_code\":%u,\"card_number\":%u,\"granted\":false,\"type\":\"rfid\",\"bits\":34}",
+               code, facilityCode, cardNumber);
       publishMQTT("access", payload);
     }
     return;
@@ -347,19 +361,21 @@ static void handleWiegandRfid(uint32_t code, uint8_t bitCount) {
     authPendingState = AUTH_IDLE;
     authPendingCode = 0;
     if (granted) {
-      logPrintf("[WG] RFID+PIN %s AUTORISE", label);
+      logMessage("[WG] RFID+PIN WG34 AUTORISE");
       blinkReaderLED(true);
       activateRelay(true);
-      char payload[128];
+      char payload[192];
       snprintf(payload, sizeof(payload),
-               "{\"code\":%lu,\"granted\":true,\"type\":\"pin+rfid\",\"bits\":%u}", code, bitCount);
+               "{\"uid\":%lu,\"facility_code\":%u,\"card_number\":%u,\"granted\":true,\"type\":\"pin+rfid\",\"bits\":34}",
+               code, facilityCode, cardNumber);
       publishMQTT("access", payload);
     } else {
-      logPrintf("[WG] RFID+PIN %s REFUSE", label);
+      logMessage("[WG] RFID+PIN WG34 REFUSE");
       blinkReaderLED(false);
-      char payload[128];
+      char payload[192];
       snprintf(payload, sizeof(payload),
-               "{\"code\":%lu,\"granted\":false,\"type\":\"pin+rfid\",\"bits\":%u}", code, bitCount);
+               "{\"uid\":%lu,\"facility_code\":%u,\"card_number\":%u,\"granted\":false,\"type\":\"pin+rfid\",\"bits\":34}",
+               code, facilityCode, cardNumber);
       publishMQTT("access", payload);
     }
   } else {
@@ -367,7 +383,8 @@ static void handleWiegandRfid(uint32_t code, uint8_t bitCount) {
     authPendingTime = millis();
     authPendingState = AUTH_WAITING_PIN;
     blinkReaderLED(true);
-    logPrintf("[WG] Badge détecté (%s) - entrez votre PIN dans %lus", label, AUTH_PENDING_TIMEOUT / 1000);
+    logPrintf("[WG] Badge WG34 détecté (facility=%u, card=%u) - entrez votre PIN dans %lus",
+              facilityCode, cardNumber, AUTH_PENDING_TIMEOUT / 1000);
   }
 }
 
@@ -398,7 +415,16 @@ void handleWiegandInput() {
   uint8_t bitCount = wg.getWiegandType();
   uint32_t code = wg.getCode();
 
-  logPrintf("[WG] Entrée: %u bits, code=%lu (0x%X)", bitCount, code, code);
+  // ===== DEBUG RAW =====
+  logPrintf("[WG][RAW] bits=%u  dec=%lu  hex=0x%08lX  B3=%02X B2=%02X B1=%02X B0=%02X",
+            bitCount, code, code,
+            (uint8_t)((code >> 24) & 0xFF),
+            (uint8_t)((code >> 16) & 0xFF),
+            (uint8_t)((code >>  8) & 0xFF),
+            (uint8_t)( code        & 0xFF));
+
+  // Marquer le timestamp pour inhiber les trames clavier parasites post-badge
+  if (bitCount >= 24) lastRfidEvent = millis();
 
   if (bitCount == 4) {
     handleKeypadEvent(code);
@@ -406,9 +432,9 @@ void handleWiegandInput() {
     handleEscapeEvent(code);
   } else if (bitCount == 26) {
     handleWiegand26(code);
-  } else if (bitCount >= 32) {
-    handleWiegandRfid(code, bitCount);
+  } else if (bitCount == 34) {
+    handleWiegand34(code);
   } else {
-    logPrintf("[WG] Format inconnu: %u bits, code=%lu", bitCount, code);
+    logPrintf("[WG][ERR] Trame %u bits rejetée (erreur comm) - code=%lu (0x%08lX)", bitCount, code, code);
   }
 }

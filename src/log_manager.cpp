@@ -10,7 +10,7 @@ static int _count = 0;
 
 // File de diffusion WebSocket — alimentée depuis n'importe quel task,
 // vidée exclusivement depuis loop() pour éviter les accès concurrents.
-#define BCAST_QUEUE_SIZE 16
+#define BCAST_QUEUE_SIZE 64
 static String _bcastQueue[BCAST_QUEUE_SIZE];
 static volatile int _bqWrite = 0;  // écrit par tous tasks
 static volatile int _bqRead  = 0;  // lu uniquement par loop()
@@ -51,13 +51,21 @@ void logMessage(const String& message) {
 }
 
 void flushLogBroadcasts() {
-  while (_bqRead != _bqWrite) {
-    portENTER_CRITICAL(&_bqMux);
-    String json = _bcastQueue[_bqRead];
-    _bqRead = (_bqRead + 1) % BCAST_QUEUE_SIZE;
-    portEXIT_CRITICAL(&_bqMux);
-    if (_broadcastCb) _broadcastCb(json);
-  }
+  // Rate-limit : au plus 1 message toutes les 30 ms pour ne pas saturer
+  // la file interne du client WebSocket (ESPAsyncWebServer ~8 slots).
+  static unsigned long lastSend = 0;
+  unsigned long now = millis();
+  if (now - lastSend < 30) return;
+
+  if (_bqRead == _bqWrite) return;  // file vide
+
+  portENTER_CRITICAL(&_bqMux);
+  String json = _bcastQueue[_bqRead];
+  _bqRead = (_bqRead + 1) % BCAST_QUEUE_SIZE;
+  portEXIT_CRITICAL(&_bqMux);
+
+  if (_broadcastCb) _broadcastCb(json);
+  lastSend = now;
 }
 
 void logPrintf(const char* fmt, ...) {
@@ -70,9 +78,16 @@ void logPrintf(const char* fmt, ...) {
 }
 
 void sendLogHistory(std::function<void(const String&)> sender) {
+  // Envoie tout l'historique en un seul message {"logs":[...]} pour éviter
+  // de saturer la file WebSocket du client (limitée à ~8 entrées).
+  JsonDocument doc;
+  JsonArray arr = doc["logs"].to<JsonArray>();
   int start = (_count < LOG_BUFFER_SIZE) ? 0 : _head;
   for (int i = 0; i < _count; i++) {
     int idx = (start + i) % LOG_BUFFER_SIZE;
-    sender(buildJson(_logBuffer[idx]));
+    arr.add(_logBuffer[idx]);
   }
+  String json;
+  serializeJson(doc, json);
+  sender(json);
 }

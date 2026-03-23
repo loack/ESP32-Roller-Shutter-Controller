@@ -481,7 +481,10 @@ function initWS(){
     if(b){b.textContent='&#128994; Connect&#233;';b.className='b b-g';}
   };
   _ws.onmessage=function(ev){
-    try{var d=JSON.parse(ev.data);if(d.log!==undefined)addLog(d.log);}catch(e){}
+    try{var d=JSON.parse(ev.data);
+      if(d.log!==undefined)addLog(d.log);
+      else if(d.logs!==undefined)d.logs.forEach(function(m){addLog(m);});
+    }catch(e){}
   };
   _ws.onclose=function(){
     var b=document.getElementById('ws-b');
