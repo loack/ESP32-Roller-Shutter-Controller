@@ -154,6 +154,13 @@ const char index_html[] PROGMEM = R"rawliteral(
           <h3>Mode Auth.</h3>
           <div class="cval" id="cv-auth" style="font-size:1em;">&#8212;</div>
         </div>
+        <div class="card">
+          <h3>Position Volet</h3>
+          <div class="cval" id="cv-pos" style="font-size:1.1em;"><span style="color:var(--muted)">Inconnu</span></div>
+          <div style="margin-top:10px;background:#e0e0e0;border-radius:4px;height:10px;overflow:hidden;">
+            <div id="pos-bar" style="height:100%;background:linear-gradient(90deg,#1976d2,#42a5f5);width:0%;transition:width .5s ease;border-radius:4px;"></div>
+          </div>
+        </div>
       </div>
 
       <h2>Contr&#244;le Manuel</h2>
@@ -168,6 +175,11 @@ const char index_html[] PROGMEM = R"rawliteral(
         <div class="pulse"></div>
         <span id="lbar-txt">Mode apprentissage actif...</span>
         <button class="btn btn-d btn-sm" onclick="stopLearn()" style="margin-left:auto;">Arr&#234;ter</button>
+      </div>
+      <div class="learn-bar" id="mwin-bar" style="background:#e3f2fd;border-color:#1976d2;">
+        <div class="pulse" style="background:#1976d2;"></div>
+        <span id="mwin-txt">Fen&#234;tre de commande &#8212; 1/2/3 &#9650; monter | 7/8/9 &#9660; descendre</span>
+        <button class="btn btn-o btn-sm" onclick="deactivateWin()" style="margin-left:auto;">Fermer</button>
       </div>
       <div class="fg" style="max-width:280px;">
         <label>Nom &#224; enregistrer</label>
@@ -245,8 +257,11 @@ const char index_html[] PROGMEM = R"rawliteral(
         <div class="fg"><label>Topic de base</label><input type="text" id="mt" value="roller"></div>
       </div>
       <h2>Relais &amp; S&#233;curit&#233;</h2>
-      <div class="grid" style="max-width:500px;">
-        <div class="fg"><label>Dur&#233;e d'activation (ms)</label><input type="number" id="rd" value="5000"></div>
+      <div class="grid" style="max-width:700px;">
+        <div class="fg"><label>Dur&#233;e d'activation automatique (ms)</label><input type="number" id="rd" value="5000"></div>
+        <div class="fg"><label>Temps trajet complet ouverture (ms)</label><input type="number" id="fod" value="20000" min="1000"></div>
+        <div class="fg"><label>Temps trajet complet fermeture (ms)</label><input type="number" id="fcd" value="20000" min="1000"></div>
+        <div class="fg"><label>Fen&#234;tre de commande manuelle post-auth (ms)</label><input type="number" id="mwd" value="15000" min="1000"></div>
         <div class="fg" style="display:flex;align-items:center;gap:8px;padding-top:22px;">
           <input type="checkbox" id="pb" style="width:18px;height:18px;">
           <label for="pb" style="margin:0;">Barri&#232;re photo activ&#233;e</label>
@@ -349,6 +364,22 @@ function loadSt(){
     set('cv-barrier',(d.barrier!==false)?'<span class="dot dg"></span>OK':'<span class="dot dr"></span>Coup&#233;e');
     var amn=['PIN seul','RFID seul','PIN+RFID (2FA)'];
     set('cv-auth',amn[d.authMode]||'&#8212;');
+    if(d.shutterKnown){
+      var p=Math.round(d.shutterPosition);
+      set('cv-pos','<strong>'+p+'%</strong>&nbsp;<span style="color:var(--muted);font-size:.85em">'+(p>=50?'(ouvert)':'(ferm\u00e9)')+'</span>');
+      document.getElementById('pos-bar').style.width=p+'%';
+    }else{
+      set('cv-pos','<span style="color:var(--muted)">Inconnu</span>');
+      document.getElementById('pos-bar').style.width='0%';
+    }
+    var mbar=document.getElementById('mwin-bar');
+    if(d.manualWindow){
+      mbar.classList.add('on');
+      var sec=Math.ceil((d.manualWindowRemaining||0)/1000);
+      document.getElementById('mwin-txt').textContent='Fen\u00eatre de commande \u2014 1/2/3 \u25b2 monter | 7/8/9 \u25bc descendre \u2014 '+sec+'s';
+    }else{
+      mbar.classList.remove('on');
+    }
     var lb=document.getElementById('lbar');
     if(d.learning){
       lb.classList.add('on');
@@ -376,6 +407,12 @@ function startLearn(t){
 
 function stopLearn(){
   fetch('/api/learn/stop',{method:'POST'}).then(function(){loadSt();}).catch(function(){});
+}
+
+function deactivateWin(){
+  fetch('/api/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'stop'})})
+  .then(function(r){return r.json();}).then(function(d){toast(d.message||'OK');loadSt();})
+  .catch(function(){toast('Erreur',1);});
 }
 
 function loadCodes(){
@@ -432,6 +469,9 @@ function loadCfg(){
     document.getElementById('mu').value=d.mqttUser||'';
     document.getElementById('mt').value=d.mqttTopic||'roller';
     document.getElementById('rd').value=d.relayDuration||5000;
+    document.getElementById('fod').value=d.fullOpenDuration||20000;
+    document.getElementById('fcd').value=d.fullCloseDuration||20000;
+    document.getElementById('mwd').value=d.manualWindowDuration||15000;
     document.getElementById('pb').checked=!!d.photoEnabled;
     document.getElementById('am').value=d.authMode!==undefined?d.authMode:1;
     updateAuthDesc();
@@ -451,6 +491,9 @@ function saveCfg(){
     mqttPassword:document.getElementById('mw').value,
     mqttTopic:document.getElementById('mt').value,
     relayDuration:+document.getElementById('rd').value,
+    fullOpenDuration:+document.getElementById('fod').value,
+    fullCloseDuration:+document.getElementById('fcd').value,
+    manualWindowDuration:+document.getElementById('mwd').value,
     photoEnabled:document.getElementById('pb').checked,
     adminPassword:document.getElementById('ap').value,
     authMode:+document.getElementById('am').value,
@@ -558,7 +601,7 @@ function savePins(){
 
 window.addEventListener('load',function(){
   loadSt();
-  setInterval(loadSt,5000);
+  setInterval(loadSt,2000);
   initWS();
 });
 </script>

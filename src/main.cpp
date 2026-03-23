@@ -28,6 +28,15 @@ bool relayActive = false;
 bool manualRelayActive = false;  // true = relais commandé par interrupteur manuel (sans temporisation)
 unsigned long lastMqttReconnect = 0;
 
+// ===== POSITION VOLET =====
+float shutterPosition    = -1.0f;   // -1=inconnu, 0.0=fermé, 100.0=ouvert
+float positionAtMoveStart = -1.0f;  // position au début du mouvement en cours
+bool  movingUp           = true;    // direction du mouvement en cours
+
+// ===== FENÊTRE DE COMMANDE MANUELLE (post-authentification) =====
+bool  manualWindowActive = false;
+unsigned long manualWindowStart = 0;
+
 // ===== PROTOTYPES =====
 void loadConfig();
 void saveConfig();
@@ -38,6 +47,7 @@ void activateRelay(bool open);
 void deactivateRelay();
 bool checkTriplePress();
 void handleManualSwitches();
+void onAccessGranted();
 
 // Fonctions externes (web + MQTT)
 void setupWebServer();
@@ -192,6 +202,44 @@ void setup() {
   }
 }
 
+// ===== CALCUL DE POSITION PAR TEMPS =====
+// Appelé à chaque désactivation du relais. N'écrit en flash que si la position est connue.
+static void computePosition() {
+  if (positionAtMoveStart < 0.0f) return;  // position initiale inconnue, on ne peut pas calculer
+  float fullDuration = (float)(movingUp ? config.fullOpenDuration : config.fullCloseDuration);
+  if (fullDuration <= 0) return;
+  float elapsed = (float)(millis() - relayStartTime);
+  float delta   = (elapsed / fullDuration) * 100.0f;
+  float newPos  = positionAtMoveStart + (movingUp ? delta : -delta);
+  shutterPosition = constrain(newPos, 0.0f, 100.0f);
+  preferences.putFloat("shutterPos", shutterPosition);
+  logPrintf("[POS] Position estimée: %.1f%% (%s, %.1fs)",
+            shutterPosition, movingUp ? "montée" : "descente", elapsed / 1000.0f);
+  char payload[64];
+  snprintf(payload, sizeof(payload), "{\"position\":%.1f}", shutterPosition);
+  publishMQTT("shutter", payload);
+}
+
+// ===== ACCÈS ACCORDÉ : ACTIVATION INTELLIGENTE SELON POSITION =====
+void onAccessGranted() {
+  bool shouldOpen;
+  if (shutterPosition < 0.0f) {
+    shouldOpen = true;
+    logMessage("[ACCESS] Position inconnue → ouverture par défaut");
+  } else if (shutterPosition >= 50.0f) {
+    shouldOpen = false;
+    logPrintf("[ACCESS] Volet à %.0f%% → fermeture", shutterPosition);
+  } else {
+    shouldOpen = true;
+    logPrintf("[ACCESS] Volet à %.0f%% → ouverture", shutterPosition);
+  }
+  activateRelay(shouldOpen);
+  manualWindowActive = true;
+  manualWindowStart  = millis();
+  logPrintf("[ACCESS] Fenêtre de commande manuelle ouverte (%lus) — 1/2/3=monter  7/8/9=descendre",
+            config.manualWindowDuration / 1000);
+}
+
 // ===== INTERRUPTEURS MANUELS =====
 // Comportement : maintenir = relais actif, relâcher = relais coupé (pas de temporisation)
 void handleManualSwitches() {
@@ -234,10 +282,14 @@ void handleManualSwitches() {
       digitalWrite(pins.relayOpen, HIGH);
       manualRelayActive = true;
       relayActive = true;
+      movingUp = true;
+      positionAtMoveStart = shutterPosition;
+      relayStartTime = millis();
       logMessage("[SW] Interrupteur manuel: OUVRIR (maintenu)");
       publishMQTT("relay", "{\"action\":\"open\",\"source\":\"switch\"}");
     } else {
-      // Relâché : couper le relais montée
+      // Relâché : couper le relais montée + calculer position
+      computePosition();
       digitalWrite(pins.relayOpen, LOW);
       manualRelayActive = false;
       relayActive = false;
@@ -255,10 +307,14 @@ void handleManualSwitches() {
       digitalWrite(pins.relayClose, HIGH);
       manualRelayActive = true;
       relayActive = true;
+      movingUp = false;
+      positionAtMoveStart = shutterPosition;
+      relayStartTime = millis();
       logMessage("[SW] Interrupteur manuel: FERMER (maintenu)");
       publishMQTT("relay", "{\"action\":\"close\",\"source\":\"switch\"}");
     } else {
-      // Relâché : couper le relais descente
+      // Relâché : couper le relais descente + calculer position
+      computePosition();
       digitalWrite(pins.relayClose, LOW);
       manualRelayActive = false;
       relayActive = false;
@@ -310,6 +366,12 @@ void loop() {
     mqttClient.loop();
   }
   
+  // Expiration de la fenêtre de commande manuelle
+  if (manualWindowActive && millis() - manualWindowStart >= config.manualWindowDuration) {
+    manualWindowActive = false;
+    logMessage("[SW] Fenêtre de commande manuelle expirée");
+  }
+
   handleManualSwitches();
 
   delay(10);
@@ -338,7 +400,12 @@ void loadConfig() {
   if (config.authMode > 2) config.authMode = AUTH_MODE_RFID_ONLY;
   
   config.initialized = preferences.getBool("init", false);
-  
+  config.fullOpenDuration     = preferences.getULong("fullOpDur", 20000);
+  config.fullCloseDuration    = preferences.getULong("fullClDur", 20000);
+  config.manualWindowDuration = preferences.getULong("manWinDur", 15000);
+  shutterPosition = preferences.getFloat("shutterPos", -1.0f);
+  if (shutterPosition >= 0) logPrintf("[POS] Position restaurée: %.1f%%", shutterPosition);
+
   logPrintf("[CFG] adminPassword: %d caractères chargés", strlen(config.adminPassword));
   logPrintf("[CFG] Chargée: Relais=%lums, MQTT=%s:%d",
             config.relayDuration, config.mqttServer, config.mqttPort);
@@ -359,7 +426,10 @@ void saveConfig() {
   preferences.putString("staticGW",  config.staticGateway);
   preferences.putString("staticSN",  config.staticSubnet);
   preferences.putBool("init", true);
-  
+  preferences.putULong("fullOpDur", config.fullOpenDuration);
+  preferences.putULong("fullClDur", config.fullCloseDuration);
+  preferences.putULong("manWinDur", config.manualWindowDuration);
+
   const char* authNames[] = {"PIN seul", "RFID seul", "PIN+RFID"};
   logPrintf("[CFG] Enregistrée en flash (mode auth: %s)", authNames[config.authMode]);
 }
@@ -388,7 +458,9 @@ void activateRelay(bool open) {
     deactivateRelay();
     delay(100);
   }
-  
+
+  movingUp = open;
+  positionAtMoveStart = shutterPosition;  // -1 si inconnu, sinon position courante
   digitalWrite(open ? pins.relayOpen : pins.relayClose, HIGH);
   relayStartTime = millis();
   relayActive = true;
@@ -403,11 +475,12 @@ void activateRelay(bool open) {
 }
 
 void deactivateRelay() {
+  if (relayActive) computePosition();  // calculer la position avant de couper
   digitalWrite(pins.relayOpen, LOW);
   digitalWrite(pins.relayClose, LOW);
   relayActive = false;
   manualRelayActive = false;  // Réinitialiser aussi l'état manuel (barrière, MQTT, etc.)
-  
+
   logMessage("[RELAY] Désactivé");
   publishMQTT("relay", "{\"action\":\"stopped\"}");
 }

@@ -14,6 +14,9 @@ const unsigned long KEYPAD_TIMEOUT = 10000;  // 10 secondes
 extern Config config;
 extern void activateRelay(bool open);
 extern void publishMQTT(const char* topic, const char* payload);
+extern void onAccessGranted();
+extern bool manualWindowActive;
+extern unsigned long manualWindowStart;
 
 // Machine d'état pour mode PIN+RFID (AUTH_MODE_PIN_RFID)
 enum PendingAuthState { AUTH_IDLE, AUTH_WAITING_PIN, AUTH_WAITING_RFID };
@@ -91,7 +94,7 @@ void processKeypadCode() {
     if (granted) {
       logMessage("[WG][KEYPAD] PIN AUTORISE");
       blinkReaderLED(true);
-      activateRelay(true);
+      onAccessGranted();
       char payload[128];
       snprintf(payload, sizeof(payload), "{\"code\":%lu,\"granted\":true,\"type\":\"pin\"}", code);
       publishMQTT("access", payload);
@@ -124,7 +127,7 @@ void processKeypadCode() {
     if (granted) {
       logMessage("[WG] PIN+RFID AUTORISE");
       blinkReaderLED(true);
-      activateRelay(true);
+      onAccessGranted();
       char payload[128];
       snprintf(payload, sizeof(payload), "{\"code\":%lu,\"granted\":true,\"type\":\"pin+rfid\"}", code);
       publishMQTT("access", payload);
@@ -154,6 +157,26 @@ static void handleKeypadEvent(uint32_t code) {
   }
   lastKeypadInput = millis();
   logPrintf("[WG][KEYPAD] Touche: raw=%lu, key=%s", code, getKeypadKeyLabel(code));
+
+  // ===== FENÊTRE DE COMMANDE MANUELLE POST-AUTH =====
+  if (manualWindowActive && millis() - manualWindowStart < config.manualWindowDuration) {
+    if (code == 1 || code == 2 || code == 3) {
+      logMessage("[SW] Fenêtre manuelle: commande MONTER");
+      activateRelay(true);
+      manualWindowActive = false;
+      return;
+    }
+    if (code == 7 || code == 8 || code == 9) {
+      logMessage("[SW] Fenêtre manuelle: commande DESCENDRE");
+      activateRelay(false);
+      manualWindowActive = false;
+      return;
+    }
+    // Toute autre touche (# * ESC chiffres) annule la fenêtre
+    logMessage("[SW] Fenêtre manuelle annulée");
+    manualWindowActive = false;
+    return;
+  }
 
   // Touche # = validation (code 13)
   if (code == 13) {
@@ -213,7 +236,7 @@ static void handleWiegand26(uint32_t code) {
     if (granted) {
       logMessage("[WG] Empreinte AUTORISEE");
       blinkReaderLED(true);
-      activateRelay(true);
+      onAccessGranted();
 
       char payload[128];
       snprintf(payload, sizeof(payload),
@@ -256,7 +279,7 @@ static void handleWiegand26(uint32_t code) {
       if (granted) {
         logMessage("[WG] RFID WG26 AUTORISE");
         blinkReaderLED(true);
-        activateRelay(true);
+        onAccessGranted();
         char payload[128];
         snprintf(payload, sizeof(payload),
                  "{\"code\":%lu,\"granted\":true,\"type\":\"rfid\",\"bits\":26}", code);
@@ -283,7 +306,7 @@ static void handleWiegand26(uint32_t code) {
       if (granted) {
         logMessage("[WG] RFID+PIN WG26 AUTORISE");
         blinkReaderLED(true);
-        activateRelay(true);
+        onAccessGranted();
         char payload[128];
         snprintf(payload, sizeof(payload),
                  "{\"code\":%lu,\"granted\":true,\"type\":\"pin+rfid\",\"bits\":26}", code);
@@ -334,7 +357,7 @@ static void handleWiegand34(uint32_t code) {
     if (granted) {
       logMessage("[WG] RFID WG34 AUTORISE");
       blinkReaderLED(true);
-      activateRelay(true);
+      onAccessGranted();
       char payload[192];
       snprintf(payload, sizeof(payload),
                "{\"uid\":%lu,\"facility_code\":%u,\"card_number\":%u,\"granted\":true,\"type\":\"rfid\",\"bits\":34}",
@@ -363,7 +386,7 @@ static void handleWiegand34(uint32_t code) {
     if (granted) {
       logMessage("[WG] RFID+PIN WG34 AUTORISE");
       blinkReaderLED(true);
-      activateRelay(true);
+      onAccessGranted();
       char payload[192];
       snprintf(payload, sizeof(payload),
                "{\"uid\":%lu,\"facility_code\":%u,\"card_number\":%u,\"granted\":true,\"type\":\"pin+rfid\",\"bits\":34}",

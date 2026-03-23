@@ -66,6 +66,10 @@ struct Config {
   char staticGateway[16];
   char staticSubnet[16];
   bool initialized;
+  // Suivi de position par temps
+  unsigned long fullOpenDuration;      // ms pour trajet complet ouverture (0→100%), défaut 20000
+  unsigned long fullCloseDuration;     // ms pour trajet complet fermeture (100→0%), défaut 20000
+  unsigned long manualWindowDuration;  // fenêtre de saisie manuelle post-auth (ms), défaut 15000
 };
 
 struct AccessLog {

@@ -13,6 +13,12 @@ extern PubSubClient mqttClient;
 extern bool relayActive;
 extern bool learningMode;
 extern uint8_t learningType;
+extern float shutterPosition;
+extern float positionAtMoveStart;
+extern bool  movingUp;
+extern bool  manualWindowActive;
+extern unsigned long manualWindowStart;
+extern unsigned long relayStartTime;
 
 extern void saveConfig();
 extern void saveAccessCodes();
@@ -113,7 +119,29 @@ void setupWebServer() {
     doc["learning"] = learningMode;
     doc["learningType"] = learningType;
     doc["authMode"] = config.authMode;
-    
+
+    // Position volet (live durant un mouvement)
+    float livePos = shutterPosition;
+    if (relayActive && positionAtMoveStart >= 0.0f) {
+      unsigned long elapsed = millis() - relayStartTime;
+      float fullDur = (float)(movingUp ? config.fullOpenDuration : config.fullCloseDuration);
+      if (fullDur > 0) {
+        float delta = (elapsed / fullDur) * 100.0f;
+        livePos = positionAtMoveStart + (movingUp ? delta : -delta);
+        if (livePos < 0.0f)   livePos = 0.0f;
+        if (livePos > 100.0f) livePos = 100.0f;
+      }
+    }
+    doc["shutterPosition"] = livePos;
+    doc["shutterKnown"]    = (livePos >= 0.0f);
+    doc["manualWindow"]    = manualWindowActive;
+    unsigned long manualRem = 0;
+    if (manualWindowActive) {
+      unsigned long el = millis() - manualWindowStart;
+      manualRem = (el < config.manualWindowDuration) ? (config.manualWindowDuration - el) : 0;
+    }
+    doc["manualWindowRemaining"] = manualRem;
+
     String response;
     serializeJson(doc, response);
     request->send(200, "application/json", response);
@@ -331,6 +359,9 @@ void setupWebServer() {
     doc["staticIP"] = config.staticIP;
     doc["staticGateway"] = config.staticGateway;
     doc["staticSubnet"] = config.staticSubnet;
+    doc["fullOpenDuration"]     = config.fullOpenDuration;
+    doc["fullCloseDuration"]    = config.fullCloseDuration;
+    doc["manualWindowDuration"] = config.manualWindowDuration;
     
     String response;
     serializeJson(doc, response);
@@ -376,6 +407,12 @@ void setupWebServer() {
         strlcpy(config.staticGateway, doc["staticGateway"] | "", 16);
       if (doc.containsKey("staticSubnet"))
         strlcpy(config.staticSubnet, doc["staticSubnet"] | "", 16);
+      if (doc["fullOpenDuration"].is<unsigned long>())
+        config.fullOpenDuration = doc["fullOpenDuration"];
+      if (doc["fullCloseDuration"].is<unsigned long>())
+        config.fullCloseDuration = doc["fullCloseDuration"];
+      if (doc["manualWindowDuration"].is<unsigned long>())
+        config.manualWindowDuration = doc["manualWindowDuration"];
 
       saveConfig();
 
