@@ -25,6 +25,7 @@ Config config;
 PinConfig pins;
 unsigned long relayStartTime = 0;
 bool relayActive = false;
+bool manualRelayActive = false;  // true = relais commandé par interrupteur manuel (sans temporisation)
 unsigned long lastMqttReconnect = 0;
 
 // ===== PROTOTYPES =====
@@ -192,20 +193,79 @@ void setup() {
 }
 
 // ===== INTERRUPTEURS MANUELS =====
+// Comportement : maintenir = relais actif, relâcher = relais coupé (pas de temporisation)
 void handleManualSwitches() {
-  static unsigned long lastPressTime = 0;
-  const unsigned long debounceDelay = 200;
+  static bool lastUpState   = HIGH;
+  static bool lastDownState = HIGH;
+  static unsigned long lastChangeTime = 0;
+  const unsigned long debounceDelay = 50;
 
-  if (millis() - lastPressTime > debounceDelay) {
-    if (digitalRead(pins.pinUpSwitch) == LOW) {
-      logMessage("[SW] Interrupteur manuel: OUVRIR");
-      activateRelay(true);
-      lastPressTime = millis();
-    } else if (digitalRead(pins.pinDownSwitch) == LOW) {
-      logMessage("[SW] Interrupteur manuel: FERMER");
-      activateRelay(false);
-      lastPressTime = millis();
+  if (millis() - lastChangeTime < debounceDelay) return;
+
+  bool upPressed   = (digitalRead(pins.pinUpSwitch)   == LOW);
+  bool downPressed = (digitalRead(pins.pinDownSwitch) == LOW);
+
+  bool upChanged   = (upPressed   != (lastUpState   == LOW));
+  bool downChanged = (downPressed != (lastDownState == LOW));
+
+  if (!upChanged && !downChanged) return;
+  lastChangeTime = millis();
+
+  // Sécurité : si les deux sont actifs simultanément, tout arrêter
+  if (upPressed && downPressed) {
+    digitalWrite(pins.relayOpen,  LOW);
+    digitalWrite(pins.relayClose, LOW);
+    if (manualRelayActive) {
+      manualRelayActive = false;
+      relayActive = false;
+      logMessage("[SW] Conflit interrupteurs - arrêt sécurité");
+      publishMQTT("relay", "{\"action\":\"stopped\"}");
     }
+    lastUpState   = LOW;
+    lastDownState = LOW;
+    return;
+  }
+
+  if (upChanged) {
+    if (upPressed) {
+      // Montée : s'assurer que la descente est inactive, puis activer la montée
+      digitalWrite(pins.relayClose, LOW);
+      delay(50);
+      digitalWrite(pins.relayOpen, HIGH);
+      manualRelayActive = true;
+      relayActive = true;
+      logMessage("[SW] Interrupteur manuel: OUVRIR (maintenu)");
+      publishMQTT("relay", "{\"action\":\"open\",\"source\":\"switch\"}");
+    } else {
+      // Relâché : couper le relais montée
+      digitalWrite(pins.relayOpen, LOW);
+      manualRelayActive = false;
+      relayActive = false;
+      logMessage("[SW] Interrupteur manuel: ARRÊT ouverture");
+      publishMQTT("relay", "{\"action\":\"stopped\"}");
+    }
+    lastUpState = upPressed ? LOW : HIGH;
+  }
+
+  if (downChanged) {
+    if (downPressed) {
+      // Descente : s'assurer que la montée est inactive, puis activer la descente
+      digitalWrite(pins.relayOpen, LOW);
+      delay(50);
+      digitalWrite(pins.relayClose, HIGH);
+      manualRelayActive = true;
+      relayActive = true;
+      logMessage("[SW] Interrupteur manuel: FERMER (maintenu)");
+      publishMQTT("relay", "{\"action\":\"close\",\"source\":\"switch\"}");
+    } else {
+      // Relâché : couper le relais descente
+      digitalWrite(pins.relayClose, LOW);
+      manualRelayActive = false;
+      relayActive = false;
+      logMessage("[SW] Interrupteur manuel: ARRÊT fermeture");
+      publishMQTT("relay", "{\"action\":\"stopped\"}");
+    }
+    lastDownState = downPressed ? LOW : HIGH;
   }
 }
 
@@ -226,8 +286,8 @@ void loop() {
   // Gestion Wiegand
   handleWiegandInput();
   
-  // Gestion relais avec temporisation
-  if (relayActive && (millis() - relayStartTime >= config.relayDuration)) {
+  // Gestion relais avec temporisation (désactivée si contrôlé par interrupteur manuel)
+  if (!manualRelayActive && relayActive && (millis() - relayStartTime >= config.relayDuration)) {
     deactivateRelay();
   }
   
@@ -346,6 +406,7 @@ void deactivateRelay() {
   digitalWrite(pins.relayOpen, LOW);
   digitalWrite(pins.relayClose, LOW);
   relayActive = false;
+  manualRelayActive = false;  // Réinitialiser aussi l'état manuel (barrière, MQTT, etc.)
   
   logMessage("[RELAY] Désactivé");
   publishMQTT("relay", "{\"action\":\"stopped\"}");
